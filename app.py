@@ -1,24 +1,42 @@
-# app.py - 网吧模拟器后端 (Supabase PostgreSQL 永久稳定版)
+# app.py - 网吧模拟器后端 (强制 IPv4 + SSL 稳定版)
 from flask import Flask, request, jsonify, render_template_string
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import hashlib
 import secrets
 from datetime import datetime, timedelta
+import socket
+import urllib.parse
 
 app = Flask(__name__)
 
-# 【核心】填入你的 Supabase Database URI (记得替换 [YOUR-PASSWORD])
-# 格式: postgresql://postgres.[项目ID]:你的密码@xxx.pooler.supabase.com:6543/postgres
+# 【核心】你的 Supabase 连接字符串
 DATABASE_URL = "postgresql://postgres:15092085416z@db.uncxcsezvofdqxayadjs.supabase.co:5432/postgres"
 
-ADMIN_PASSWORD = "15092085416z" # 后台管理员密码
+ADMIN_PASSWORD = "admin123" # 后台管理员密码
 
 # ================= 数据库工具 =================
 def get_db():
-    # 使用 Supabase 提供的连接池端口 (6543)
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    """获取数据库连接，强制使用 IPv4 和 SSL 以避免 Render 网络问题"""
+    try:
+        parsed = urllib.parse.urlparse(DATABASE_URL)
+        host = parsed.hostname
+        
+        # 强制解析为 IPv4 地址
+        ipv4_host = socket.gethostbyname(host)
+        
+        # 重建包含 IPv4 地址和强制 SSL 的连接字符串
+        new_netloc = f"{parsed.username}:{parsed.password}@{ipv4_host}:{parsed.port}"
+        query = "sslmode=require"
+        new_url = urllib.parse.urlunparse((parsed.scheme, new_netloc, parsed.path, parsed.params, query, parsed.fragment))
+        
+        conn = psycopg2.connect(new_url)
+        return conn
+    except Exception as e:
+        print(f"IPv4 解析失败，尝试直连: {e}")
+        # 降级方案：直接连接，但强制加上 sslmode=require
+        fallback_url = DATABASE_URL + ("&sslmode=require" if "?" in DATABASE_URL else "?sslmode=require")
+        return psycopg2.connect(fallback_url)
 
 def init_db():
     conn = get_db()
@@ -165,7 +183,7 @@ ADMIN_HTML_TEMPLATE = """
 """
 
 @app.route('/', methods=['GET'])
-def index(): return jsonify({"message": "网吧模拟器云端服务器 (Supabase稳定版)", "admin_panel": "/admin"})
+def index(): return jsonify({"message": "网吧模拟器云端服务器 (IPv4 稳定版)", "admin_panel": "/admin"})
 
 @app.route('/admin')
 def admin_page(): return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADMIN_PASSWORD_PLACEHOLDER', ADMIN_PASSWORD))
