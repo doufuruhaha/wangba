@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (修复 JSON 解析兼容性问题)
+# app.py - 网吧模拟器后端 (含版本检测接口)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -10,6 +10,10 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "admin123"
+
+# ================= 版本控制配置 =================
+LATEST_VERSION = "1.0.0"  # 【管理员修改这里】：发布新版本时，请修改此版本号
+UPDATE_MESSAGE = "修复了存档读取bug，增加了网吧升级与声望系统！请更新客户端。"
 
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -154,6 +158,15 @@ def index():
 def admin_page(): 
     return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADMIN_PASSWORD_PLACEHOLDER', ADMIN_PASSWORD))
 
+# ================= 【新增】版本检测接口 =================
+@app.route('/api/version', methods=['GET'])
+def get_version():
+    return jsonify({
+        "status": "success",
+        "latest_version": LATEST_VERSION,
+        "update_message": UPDATE_MESSAGE
+    })
+
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
@@ -203,7 +216,6 @@ def login():
     conn.close()
     return jsonify({"status": "success", "message": "登录成功！", "token": token, "username": username})
 
-# ================= 【核心修复】安全解析旧数据 =================
 @app.route('/api/load', methods=['GET'])
 def load_save():
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -218,28 +230,20 @@ def load_save():
     conn.close()
     
     if save:
-        # 安全解析 socket_states (兼容旧的 "0,0,0" 格式)
         try:
             socket_states = json.loads(save['socket_states'])
         except (json.JSONDecodeError, TypeError):
             socket_states = [int(x) for x in str(save['socket_states']).split(',')]
-        
-        # 安全解析 achievements
         try:
             achievements = json.loads(save['achievements'])
         except (json.JSONDecodeError, TypeError):
             achievements = []
 
         return jsonify({"status": "success", "data": {
-            "money": save['money'], 
-            "hygiene": save['hygiene'],
-            "has_cleaner": bool(save['has_cleaner']), 
-            "has_repairman": bool(save['has_repairman']),
-            "socket_states": socket_states,
-            "total_earned": save['total_earned'],
-            "achievements": achievements,
-            "reputation": save['reputation'],
-            "cafe_level": save['cafe_level']
+            "money": save['money'], "hygiene": save['hygiene'],
+            "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']),
+            "socket_states": socket_states, "total_earned": save['total_earned'],
+            "achievements": achievements, "reputation": save['reputation'], "cafe_level": save['cafe_level']
         }})
     return jsonify({"status": "error", "message": "存档不存在"}), 404
 
@@ -269,8 +273,7 @@ def save_data():
 
 @app.route('/api/admin/users', methods=['GET'])
 def get_all_users():
-    if not check_admin_auth(): 
-        return jsonify({"status": "error", "message": "未授权"}), 403
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT u.id, u.username, u.created_at, s.money, s.hygiene, s.has_cleaner, s.has_repairman FROM users u LEFT JOIN saves s ON u.id = s.user_id ORDER BY u.id DESC')
@@ -280,8 +283,7 @@ def get_all_users():
 
 @app.route('/api/admin/update_money', methods=['POST'])
 def admin_update_money():
-    if not check_admin_auth(): 
-        return jsonify({"status": "error", "message": "未授权"}), 403
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     data = request.json
     conn = get_db()
     cursor = conn.cursor()
@@ -292,8 +294,7 @@ def admin_update_money():
 
 @app.route('/api/admin/delete_user', methods=['POST'])
 def admin_delete_user():
-    if not check_admin_auth(): 
-        return jsonify({"status": "error", "message": "未授权"}), 403
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     data = request.json
     conn = get_db()
     cursor = conn.cursor()
@@ -305,15 +306,12 @@ def admin_delete_user():
 
 @app.route('/api/admin/add_user', methods=['POST'])
 def admin_add_user():
-    if not check_admin_auth(): 
-        return jsonify({"status": "error", "message": "未授权"}), 403
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     data = request.json
     username = data.get('username', '').strip()
     password = data.get('password', '')
     money = data.get('money', 500)
-    if not username or not password: 
-        return jsonify({"status": "error", "message": "用户名和密码不能为空"}), 400
-        
+    if not username or not password: return jsonify({"status": "error", "message": "用户名和密码不能为空"}), 400
     conn = get_db()
     cursor = conn.cursor()
     try:
