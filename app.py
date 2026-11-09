@@ -12,7 +12,7 @@ DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "admin123"
 
 # ================= 版本与下载控制配置 =================
-LATEST_VERSION = "1.0.1"  
+LATEST_VERSION = "1.0.0"  
 UPDATE_MESSAGE = "修复了存档读取bug，增加了网吧升级与声望系统！"
 # 【核心】在这里配置最新的下载地址，所有旧版本客户端都会自动获取这个链接
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases" 
