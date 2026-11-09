@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # ================= Supabase 配置 (已填入你的真实信息) =================
 SUPABASE_URL = "https://uncxcsezvofdqxayadjs.supabase.co"
-SUPABASE_KEY = "sb_secret_cUp7WWsIKruixCpf0jz9Tg_QlB_eg8z"
+SUPABASE_KEY = "sb_publishable_JoYLqdgSko1XlF2EeJztDA_cUIkgXHy"
 
 # 初始化 Supabase 客户端
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
