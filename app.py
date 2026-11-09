@@ -1,38 +1,52 @@
-# app.py - 网吧模拟器后端 (Supabase HTTPS 终极稳定版)
+# app.py - 网吧模拟器 (Render 部署版 - SQLite + 完整后台)
 from flask import Flask, request, jsonify, render_template_string
-from supabase import create_client, Client
+import sqlite3
 import hashlib
 import secrets
 import json
+import os
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+DATABASE = 'netcafe.db'
+ADMIN_PASSWORD = "123456zzz" # 后台管理员密码
 
-# ================= Supabase 配置 (已填入你的真实信息) =================
-SUPABASE_URL = "https://uncxcsezvofdqxayadjs.supabase.co"
-SUPABASE_KEY = "sb_publishable_JoYLqdgSko1XlF2EeJztDA_cUIkgXHy"
+# ================= 数据库工具 =================
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
+    return conn
 
-# 初始化 Supabase 客户端
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, token TEXT UNIQUE, token_expires TEXT, created_at TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS saves (
+        user_id INTEGER PRIMARY KEY, money INTEGER DEFAULT 500, hygiene INTEGER DEFAULT 100,
+        has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0,
+        socket_states TEXT DEFAULT '0,0,0', total_earned INTEGER DEFAULT 0,
+        achievements TEXT DEFAULT '[]', FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
+    conn.commit()
+    conn.close()
 
-ADMIN_PASSWORD = "admin123" # 后台管理员密码
+init_db()
 
 # ================= 工具函数 =================
 def hash_password(password): return hashlib.sha256(password.encode()).hexdigest()
 def generate_token(): return secrets.token_urlsafe(32)
-
 def verify_token(token):
-    response = supabase.table("users").select("*").eq("token", token).execute()
-    if response.data and len(response.data) > 0:
-        user = response.data[0]
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE token = ?', (token,)); user = cursor.fetchone(); conn.close()
+    if user:
         expires = datetime.fromisoformat(user['token_expires'])
-        if datetime.now() < expires: return user
+        if datetime.now() < expires: return dict(user)
     return None
+def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-def check_admin_auth(): 
-    return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
-
-# ================= 网页后台管理界面 =================
+# ================= 网页后台管理界面 (完整 HTML) =================
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -127,8 +141,9 @@ ADMIN_HTML_TEMPLATE = """
 </html>
 """
 
+# ================= API 路由 =================
 @app.route('/', methods=['GET'])
-def index(): return jsonify({"message": "网吧模拟器云端服务器 (Supabase HTTPS 稳定版)", "admin_panel": "/admin"})
+def index(): return jsonify({"message": "网吧模拟器运行中", "admin_panel": "/admin"})
 
 @app.route('/admin')
 def admin_page(): return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADMIN_PASSWORD_PLACEHOLDER', ADMIN_PASSWORD))
@@ -137,55 +152,37 @@ def admin_page(): return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADM
 def register():
     data = request.json; username = data.get('username', '').strip(); password = data.get('password', '')
     if not username or not password: return jsonify({"status": "error", "message": "用户名和密码不能为空"}), 400
-    if len(username) < 3 or len(password) < 6: return jsonify({"status": "error", "message": "用户名至少3位，密码至少6位"}), 400
-    
-    password_hash = hash_password(password); token = generate_token()
-    expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
-    
+    conn = get_db(); cursor = conn.cursor()
     try:
-        user_res = supabase.table("users").insert({
-            "username": username, "password_hash": password_hash, "token": token, 
-            "token_expires": expires, "created_at": created_at
-        }).execute()
-        user_id = user_res.data[0]['id']
-        
-        supabase.table("saves").insert({
-            "user_id": user_id, "money": 500, "hygiene": 100, 
-            "has_cleaner": 0, "has_repairman": 0, "socket_states": "0,0,0", 
-            "total_earned": 0, "achievements": "[]"
-        }).execute()
-        
+        password_hash = hash_password(password); token = generate_token()
+        expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
+        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)', 
+                       (username, password_hash, token, expires, created_at))
+        user_id = cursor.lastrowid
+        cursor.execute('INSERT INTO saves (user_id) VALUES (?)', (user_id,))
+        conn.commit()
         return jsonify({"status": "success", "message": "注册成功！", "token": token, "username": username})
-    except Exception as e:
-        if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
-            return jsonify({"status": "error", "message": "用户名已存在"}), 409
-        return jsonify({"status": "error", "message": str(e)}), 500
+    except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "用户名已存在"}), 409
+    finally: conn.close()
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json; username = data.get('username', '').strip(); password = data.get('password', '')
-    
-    response = supabase.table("users").select("*").eq("username", username).execute()
-    if not response.data or len(response.data) == 0:
-        return jsonify({"status": "error", "message": "用户名或密码错误"}), 401
-        
-    user = response.data[0]
-    if user['password_hash'] != hash_password(password):
-        return jsonify({"status": "error", "message": "用户名或密码错误"}), 401
-        
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE username = ?', (username,)); user = cursor.fetchone(); conn.close()
+    if not user or user['password_hash'] != hash_password(password): return jsonify({"status": "error", "message": "用户名或密码错误"}), 401
     token = generate_token(); expires = (datetime.now() + timedelta(days=30)).isoformat()
-    supabase.table("users").update({"token": token, "token_expires": expires}).eq("id", user['id']).execute()
-    
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('UPDATE users SET token = ?, token_expires = ? WHERE id = ?', (token, expires, user['id'])); conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "登录成功！", "token": token, "username": username})
 
 @app.route('/api/load', methods=['GET'])
 def load_save():
     token = request.headers.get('Authorization', '').replace('Bearer ', ''); user = verify_token(token)
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
-    
-    response = supabase.table("saves").select("*").eq("user_id", user['id']).execute()
-    if response.data and len(response.data) > 0:
-        save = response.data[0]
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM saves WHERE user_id = ?', (user['id'],)); save = cursor.fetchone(); conn.close()
+    if save:
         return jsonify({"status": "success", "data": {
             "money": save['money'], "hygiene": save['hygiene'],
             "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']),
@@ -200,50 +197,41 @@ def save_data():
     token = request.headers.get('Authorization', '').replace('Bearer ', ''); user = verify_token(token)
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
     data = request.json
-    
-    supabase.table("saves").upsert({
-        "user_id": user['id'],
-        "money": data.get('money', 500), "hygiene": data.get('hygiene', 100),
-        "has_cleaner": 1 if data.get('has_cleaner') else 0, 
-        "has_repairman": 1 if data.get('has_repairman') else 0,
-        "socket_states": json.dumps(data.get('socket_states', [0,0,0])),
-        "total_earned": data.get('total_earned', 0),
-        "achievements": json.dumps(data.get('achievements', []))
-    }, on_conflict="user_id").execute()
-    
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene, 
+        has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman,
+        socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements''',
+        (user['id'], data.get('money', 500), data.get('hygiene', 100), 
+         1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0,
+         json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', []))))
+    conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "存档已保存"})
 
+# ================= 后台管理 API =================
 @app.route('/api/admin/users', methods=['GET'])
 def get_all_users():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    users_res = supabase.table("users").select("id, username, created_at").order("id", desc=True).execute()
-    users = users_res.data
-    
-    for u in users:
-        save_res = supabase.table("saves").select("money, hygiene, has_cleaner, has_repairman").eq("user_id", u['id']).execute()
-        if save_res.data and len(save_res.data) > 0:
-            s = save_res.data[0]
-            u['money'] = s['money']; u['hygiene'] = s['hygiene']
-            u['has_cleaner'] = s['has_cleaner']; u['has_repairman'] = s['has_repairman']
-        else:
-            u['money'] = 500; u['hygiene'] = 100; u['has_cleaner'] = 0; u['has_repairman'] = 0
-            
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT u.id, u.username, u.created_at, s.money, s.hygiene, s.has_cleaner, s.has_repairman FROM users u LEFT JOIN saves s ON u.id = s.user_id ORDER BY u.id DESC')
+    users = [dict(row) for row in cursor.fetchall()]; conn.close()
     return jsonify({"status": "success", "users": users})
 
 @app.route('/api/admin/update_money', methods=['POST'])
 def admin_update_money():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    data = request.json
-    supabase.table("saves").update({"money": data.get('money')}).eq("user_id", data.get('user_id')).execute()
+    data = request.json; conn = get_db(); cursor = conn.cursor()
+    cursor.execute('UPDATE saves SET money = ? WHERE user_id = ?', (data.get('money'), data.get('user_id'))); conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "金额已修改"})
 
 @app.route('/api/admin/delete_user', methods=['POST'])
 def admin_delete_user():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    data = request.json
-    user_id = data.get('user_id')
-    supabase.table("saves").delete().eq("user_id", user_id).execute()
-    supabase.table("users").delete().eq("id", user_id).execute()
+    data = request.json; conn = get_db(); cursor = conn.cursor()
+    cursor.execute('DELETE FROM saves WHERE user_id = ?', (data.get('user_id'),))
+    cursor.execute('DELETE FROM users WHERE id = ?', (data.get('user_id'),))
+    conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "用户已删除"})
 
 @app.route('/api/admin/add_user', methods=['POST'])
@@ -251,27 +239,19 @@ def admin_add_user():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     data = request.json; username = data.get('username', '').strip(); password = data.get('password', ''); money = data.get('money', 500)
     if not username or not password: return jsonify({"status": "error", "message": "用户名和密码不能为空"}), 400
-    
+    conn = get_db(); cursor = conn.cursor()
     try:
         password_hash = hash_password(password); token = generate_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
-        
-        user_res = supabase.table("users").insert({
-            "username": username, "password_hash": password_hash, "token": token, 
-            "token_expires": expires, "created_at": created_at
-        }).execute()
-        user_id = user_res.data[0]['id']
-        
-        supabase.table("saves").insert({
-            "user_id": user_id, "money": money, "hygiene": 100, 
-            "has_cleaner": 0, "has_repairman": 0, "socket_states": "0,0,0", 
-            "total_earned": 0, "achievements": "[]"
-        }).execute()
-        
+        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)', 
+                       (username, password_hash, token, expires, created_at))
+        user_id = cursor.lastrowid
+        cursor.execute('INSERT INTO saves (user_id, money) VALUES (?, ?)', (user_id, money))
+        conn.commit()
         return jsonify({"status": "success", "message": f"用户 {username} 添加成功！"})
-    except Exception as e:
-        if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
-            return jsonify({"status": "error", "message": "用户名已存在"}), 409
-        return jsonify({"status": "error", "message": str(e)}), 500
+    except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "用户名已存在"}), 409
+    finally: conn.close()
 
-if __name__ == '__main__': app.run(host='0.0.0.0', port=10000)
+if __name__ == '__main__': 
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
