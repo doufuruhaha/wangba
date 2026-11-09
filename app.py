@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (MongoDB 永久免费版)
+# app.py - 网吧模拟器后端 (支持成就与报表永久存档)
 from flask import Flask, request, jsonify, render_template_string
 from pymongo import MongoClient
 import hashlib
@@ -8,23 +8,18 @@ from bson import ObjectId
 
 app = Flask(__name__)
 
-# 【核心】请在这里粘贴你刚才复制的完整 MongoDB 链接
-# 格式类似：mongodb+srv://353170383_db_user:你的密码@cluster0.pvyazes.mongodb.net/?retryWrites=true&w=majority
+# 【核心】你的 MongoDB 链接 (请确保这里是你自己的链接)
 MONGODB_URI = "mongodb+srv://353170383_db_user:V1GyH0elG2H6cZqE@cluster0.pvyazes.mongodb.net/?retryWrites=true&w=majority"
+ADMIN_PASSWORD = "15092085416z"
 
-ADMIN_PASSWORD = "15092085416z" # 后台管理员密码
-
-# ================= 数据库连接 =================
 client = MongoClient(MONGODB_URI)
 db = client['netcafe_db']
 users_col = db['users']
 saves_col = db['saves']
 
-# 创建唯一索引
 users_col.create_index("username", unique=True)
 users_col.create_index("token", unique=True)
 
-# ================= 工具函数 =================
 def hash_password(password): return hashlib.sha256(password.encode()).hexdigest()
 def generate_token(): return secrets.token_urlsafe(32)
 def verify_token(token):
@@ -35,7 +30,7 @@ def verify_token(token):
     return None
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-# ================= 网页后台管理界面 =================
+# (后台管理 HTML 保持不变，为节省篇幅省略，请保留你之前的 ADMIN_HTML_TEMPLATE)
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -131,7 +126,7 @@ ADMIN_HTML_TEMPLATE = """
 """
 
 @app.route('/', methods=['GET'])
-def index(): return jsonify({"message": "网吧模拟器云端服务器 (MongoDB永久版)", "admin_panel": "/admin"})
+def index(): return jsonify({"message": "网吧模拟器云端服务器 (成就版)", "admin_panel": "/admin"})
 
 @app.route('/admin')
 def admin_page(): return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADMIN_PASSWORD_PLACEHOLDER', ADMIN_PASSWORD))
@@ -145,7 +140,8 @@ def register():
         password_hash = hash_password(password); token = generate_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
         users_col.insert_one({"username": username, "password_hash": password_hash, "token": token, "token_expires": expires, "created_at": created_at})
-        saves_col.insert_one({"username": username, "money": 500, "hygiene": 100, "has_cleaner": False, "has_repairman": False, "socket_states": [0, 0, 0]})
+        # 【新增】初始化成就和累计收益
+        saves_col.insert_one({"username": username, "money": 500, "hygiene": 100, "has_cleaner": False, "has_repairman": False, "socket_states": [0, 0, 0], "total_earned": 0, "achievements": []})
         return jsonify({"status": "success", "message": "注册成功！", "token": token, "username": username})
     except Exception as e:
         if "duplicate key" in str(e): return jsonify({"status": "error", "message": "用户名已存在"}), 409
@@ -175,7 +171,13 @@ def save_data():
     token = request.headers.get('Authorization', '').replace('Bearer ', ''); user = verify_token(token)
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
     data = request.json
-    saves_col.update_one({"username": user['username']}, {"$set": {"money": data.get('money', 500), "hygiene": data.get('hygiene', 100), "has_cleaner": data.get('has_cleaner', False), "has_repairman": data.get('has_repairman', False), "socket_states": data.get('socket_states', [0,0,0])}}, upsert=True)
+    saves_col.update_one({"username": user['username']}, {"$set": {
+        "money": data.get('money', 500), "hygiene": data.get('hygiene', 100),
+        "has_cleaner": data.get('has_cleaner', False), "has_repairman": data.get('has_repairman', False),
+        "socket_states": data.get('socket_states', [0,0,0]),
+        "total_earned": data.get('total_earned', 0),
+        "achievements": data.get('achievements', [])
+    }}, upsert=True)
     return jsonify({"status": "success", "message": "存档已保存"})
 
 @app.route('/api/admin/users', methods=['GET'])
@@ -213,7 +215,7 @@ def admin_add_user():
         password_hash = hash_password(password); token = generate_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
         users_col.insert_one({"username": username, "password_hash": password_hash, "token": token, "token_expires": expires, "created_at": created_at})
-        saves_col.insert_one({"username": username, "money": money, "hygiene": 100, "has_cleaner": False, "has_repairman": False, "socket_states": [0,0,0]})
+        saves_col.insert_one({"username": username, "money": money, "hygiene": 100, "has_cleaner": False, "has_repairman": False, "socket_states": [0,0,0], "total_earned": 0, "achievements": []})
         return jsonify({"status": "success", "message": f"用户 {username} 添加成功！"})
     except Exception as e:
         if "duplicate key" in str(e): return jsonify({"status": "error", "message": "用户名已存在"}), 409
