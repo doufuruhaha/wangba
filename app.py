@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器 (Render 部署版 - SQLite + 完整后台)
+# app.py - 网吧模拟器后端 (支持声望与升级系统)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -9,9 +9,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 DATABASE = 'netcafe.db'
-ADMIN_PASSWORD = "123456zzz" # 后台管理员密码
+ADMIN_PASSWORD = "admin123"
 
-# ================= 数据库工具 =================
 def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
@@ -24,17 +23,18 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL, token TEXT UNIQUE, token_expires TEXT, created_at TEXT)''')
+    # 【新增】增加了 reputation 和 cafe_level 字段
     cursor.execute('''CREATE TABLE IF NOT EXISTS saves (
         user_id INTEGER PRIMARY KEY, money INTEGER DEFAULT 500, hygiene INTEGER DEFAULT 100,
         has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0,
         socket_states TEXT DEFAULT '0,0,0', total_earned INTEGER DEFAULT 0,
-        achievements TEXT DEFAULT '[]', FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
+        achievements TEXT DEFAULT '[]', reputation INTEGER DEFAULT 0, cafe_level INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# ================= 工具函数 =================
 def hash_password(password): return hashlib.sha256(password.encode()).hexdigest()
 def generate_token(): return secrets.token_urlsafe(32)
 def verify_token(token):
@@ -46,7 +46,7 @@ def verify_token(token):
     return None
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-# ================= 网页后台管理界面 (完整 HTML) =================
+# ================= 网页后台管理界面 =================
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -141,7 +141,6 @@ ADMIN_HTML_TEMPLATE = """
 </html>
 """
 
-# ================= API 路由 =================
 @app.route('/', methods=['GET'])
 def index(): return jsonify({"message": "网吧模拟器运行中", "admin_panel": "/admin"})
 
@@ -188,7 +187,9 @@ def load_save():
             "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']),
             "socket_states": json.loads(save['socket_states']),
             "total_earned": save['total_earned'],
-            "achievements": json.loads(save['achievements'])
+            "achievements": json.loads(save['achievements']),
+            "reputation": save['reputation'],
+            "cafe_level": save['cafe_level']
         }})
     return jsonify({"status": "error", "message": "存档不存在"}), 404
 
@@ -198,18 +199,19 @@ def save_data():
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
     data = request.json
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements, reputation, cafe_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene, 
         has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman,
-        socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements''',
+        socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements,
+        reputation=excluded.reputation, cafe_level=excluded.cafe_level''',
         (user['id'], data.get('money', 500), data.get('hygiene', 100), 
          1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0,
-         json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', []))))
+         json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', [])),
+         data.get('reputation', 0), data.get('cafe_level', 0)))
     conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "存档已保存"})
 
-# ================= 后台管理 API =================
 @app.route('/api/admin/users', methods=['GET'])
 def get_all_users():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
