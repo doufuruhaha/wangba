@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (最终完整版：含库存存档修复)
+# app.py - 网吧模拟器后端 (最终完整版：含销售员存档)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -12,7 +12,7 @@ DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "123456zzz"
 
 LATEST_VERSION = "1.0.0"  
-UPDATE_MESSAGE = "修复了库存存档丢失和菜单闪烁问题！"
+UPDATE_MESSAGE = "新增自动进货的销售食品员！修复了售卖增加时间过短的Bug！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
 def get_db():
@@ -27,10 +27,10 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL, token TEXT UNIQUE, token_expires TEXT, created_at TEXT)''')
-    # 【修复】增加了 stock_water 和 stock_noodles 字段
+    # 【新增】增加了 has_vendor 字段
     cursor.execute('''CREATE TABLE IF NOT EXISTS saves (
         user_id INTEGER PRIMARY KEY, money INTEGER DEFAULT 500, hygiene INTEGER DEFAULT 100,
-        has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0,
+        has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0, has_vendor INTEGER DEFAULT 0,
         socket_states TEXT DEFAULT '0,0,0', total_earned INTEGER DEFAULT 0,
         achievements TEXT DEFAULT '[]', reputation INTEGER DEFAULT 0, cafe_level INTEGER DEFAULT 0,
         stock_water INTEGER DEFAULT 0, stock_noodles INTEGER DEFAULT 0,
@@ -53,7 +53,6 @@ def verify_token(token):
 
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-# ================= 完整的后台管理 HTML =================
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -93,7 +92,7 @@ ADMIN_HTML_TEMPLATE = """
             </div>
             <h3>👥 用户列表</h3>
             <table>
-                <thead><tr><th>ID</th><th>用户名</th><th>金钱</th><th>卫生度</th><th>阿姨</th><th>修理工</th><th>注册时间</th><th>操作</th></tr></thead>
+                <thead><tr><th>ID</th><th>用户名</th><th>金钱</th><th>卫生度</th><th>阿姨</th><th>修理工</th><th>销售员</th><th>注册时间</th><th>操作</th></tr></thead>
                 <tbody id="user-list"></tbody>
             </table>
         </div>
@@ -116,7 +115,7 @@ ADMIN_HTML_TEMPLATE = """
             if (data.status === 'success') {
                 data.users.forEach(u => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${u['id']}</td><td>${u.username}</td><td>$${u.money} <button class="btn-primary" style="font-size:12px; padding:2px 5px;" onclick="updateMoney(${u['id']}, ${u.money})">改钱</button></td><td>${u.hygiene}%</td><td>${u.has_cleaner ? '✅' : '❌'}</td><td>${u.has_repairman ? '✅' : '❌'}</td><td>${u.created_at.split('T')[0]}</td><td><button class="btn-danger" style="font-size:12px; padding:2px 5px;" onclick="deleteUser(${u['id']}, '${u.username}')">删除</button></td>`;
+                    tr.innerHTML = `<td>${u['id']}</td><td>${u.username}</td><td>$${u.money} <button class="btn-primary" style="font-size:12px; padding:2px 5px;" onclick="updateMoney(${u['id']}, ${u.money})">改钱</button></td><td>${u.hygiene}%</td><td>${u.has_cleaner ? '✅' : '❌'}</td><td>${u.has_repairman ? '✅' : '❌'}</td><td>${u.has_vendor ? '✅' : '❌'}</td><td>${u.created_at.split('T')[0]}</td><td><button class="btn-danger" style="font-size:12px; padding:2px 5px;" onclick="deleteUser(${u['id']}, '${u.username}')">删除</button></td>`;
                     tbody.appendChild(tr);
                 });
             } else { alert('加载失败'); logout(); }
@@ -199,10 +198,10 @@ def load_save():
         except: achievements = []
         return jsonify({"status": "success", "data": {
             "money": save['money'], "hygiene": save['hygiene'],
-            "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']),
+            "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']), "has_vendor": bool(save['has_vendor']),
             "socket_states": socket_states, "total_earned": save['total_earned'],
             "achievements": achievements, "reputation": save['reputation'], "cafe_level": save['cafe_level'],
-            "stock_water": save['stock_water'], "stock_noodles": save['stock_noodles'] # 【修复】返回库存
+            "stock_water": save['stock_water'], "stock_noodles": save['stock_noodles']
         }})
     return jsonify({"status": "error", "message": "存档不存在"}), 404
 
@@ -212,19 +211,18 @@ def save_data():
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
     data = request.json
     conn = get_db(); cursor = conn.cursor()
-    # 【修复】在 INSERT 和 ON CONFLICT 中加入 stock_water 和 stock_noodles
-    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements, reputation, cafe_level, stock_water, stock_noodles)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, has_vendor, socket_states, total_earned, achievements, reputation, cafe_level, stock_water, stock_noodles)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene, 
-        has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman,
+        has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman, has_vendor=excluded.has_vendor,
         socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements,
         reputation=excluded.reputation, cafe_level=excluded.cafe_level,
         stock_water=excluded.stock_water, stock_noodles=excluded.stock_noodles''',
         (user['id'], data.get('money', 500), data.get('hygiene', 100), 
-         1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0,
+         1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0, 1 if data.get('has_vendor') else 0,
          json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', [])),
          data.get('reputation', 0), data.get('cafe_level', 0),
-         data.get('stock_water', 0), data.get('stock_noodles', 0))) # 【修复】传入库存数据
+         data.get('stock_water', 0), data.get('stock_noodles', 0)))
     conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "存档已保存"})
 
@@ -232,7 +230,7 @@ def save_data():
 def get_all_users():
     if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('SELECT u.id, u.username, u.created_at, s.money, s.hygiene, s.has_cleaner, s.has_repairman FROM users u LEFT JOIN saves s ON u.id = s.user_id ORDER BY u.id DESC')
+    cursor.execute('SELECT u.id, u.username, u.created_at, s.money, s.hygiene, s.has_cleaner, s.has_repairman, s.has_vendor FROM users u LEFT JOIN saves s ON u.id = s.user_id ORDER BY u.id DESC')
     users = [dict(row) for row in cursor.fetchall()]; conn.close()
     return jsonify({"status": "success", "users": users})
 
