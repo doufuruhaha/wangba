@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (含动态下载链接的版本控制)
+# app.py - 网吧模拟器后端 (最终完整版：含库存存档修复)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -9,13 +9,11 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 DATABASE = 'netcafe.db'
-ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = "123456zzz"
 
-# ================= 版本与下载控制配置 =================
 LATEST_VERSION = "1.0.0"  
-UPDATE_MESSAGE = "修复了存档读取bug，增加了网吧升级与声望系统！"
-# 【核心】在这里配置最新的下载地址，所有旧版本客户端都会自动获取这个链接
-DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases" 
+UPDATE_MESSAGE = "修复了库存存档丢失和菜单闪烁问题！"
+DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -29,11 +27,13 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL, token TEXT UNIQUE, token_expires TEXT, created_at TEXT)''')
+    # 【修复】增加了 stock_water 和 stock_noodles 字段
     cursor.execute('''CREATE TABLE IF NOT EXISTS saves (
         user_id INTEGER PRIMARY KEY, money INTEGER DEFAULT 500, hygiene INTEGER DEFAULT 100,
         has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0,
         socket_states TEXT DEFAULT '0,0,0', total_earned INTEGER DEFAULT 0,
         achievements TEXT DEFAULT '[]', reputation INTEGER DEFAULT 0, cafe_level INTEGER DEFAULT 0,
+        stock_water INTEGER DEFAULT 0, stock_noodles INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
     conn.commit()
     conn.close()
@@ -154,15 +154,9 @@ def index(): return jsonify({"message": "网吧模拟器运行中", "admin_panel
 @app.route('/admin')
 def admin_page(): return render_template_string(ADMIN_HTML_TEMPLATE.replace('ADMIN_PASSWORD_PLACEHOLDER', ADMIN_PASSWORD))
 
-# ================= 【修改】版本检测接口 (返回下载链接) =================
 @app.route('/api/version', methods=['GET'])
 def get_version():
-    return jsonify({
-        "status": "success",
-        "latest_version": LATEST_VERSION,
-        "update_message": UPDATE_MESSAGE,
-        "download_url": DOWNLOAD_URL  # 将下载链接传给客户端
-    })
+    return jsonify({"status": "success", "latest_version": LATEST_VERSION, "update_message": UPDATE_MESSAGE, "download_url": DOWNLOAD_URL})
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -207,7 +201,8 @@ def load_save():
             "money": save['money'], "hygiene": save['hygiene'],
             "has_cleaner": bool(save['has_cleaner']), "has_repairman": bool(save['has_repairman']),
             "socket_states": socket_states, "total_earned": save['total_earned'],
-            "achievements": achievements, "reputation": save['reputation'], "cafe_level": save['cafe_level']
+            "achievements": achievements, "reputation": save['reputation'], "cafe_level": save['cafe_level'],
+            "stock_water": save['stock_water'], "stock_noodles": save['stock_noodles'] # 【修复】返回库存
         }})
     return jsonify({"status": "error", "message": "存档不存在"}), 404
 
@@ -217,16 +212,19 @@ def save_data():
     if not user: return jsonify({"status": "error", "message": "token 无效"}), 401
     data = request.json
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements, reputation, cafe_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    # 【修复】在 INSERT 和 ON CONFLICT 中加入 stock_water 和 stock_noodles
+    cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, socket_states, total_earned, achievements, reputation, cafe_level, stock_water, stock_noodles)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene, 
         has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman,
         socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements,
-        reputation=excluded.reputation, cafe_level=excluded.cafe_level''',
+        reputation=excluded.reputation, cafe_level=excluded.cafe_level,
+        stock_water=excluded.stock_water, stock_noodles=excluded.stock_noodles''',
         (user['id'], data.get('money', 500), data.get('hygiene', 100), 
          1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0,
          json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', [])),
-         data.get('reputation', 0), data.get('cafe_level', 0)))
+         data.get('reputation', 0), data.get('cafe_level', 0),
+         data.get('stock_water', 0), data.get('stock_noodles', 0))) # 【修复】传入库存数据
     conn.commit(); conn.close()
     return jsonify({"status": "success", "message": "存档已保存"})
 
