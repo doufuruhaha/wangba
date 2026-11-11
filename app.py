@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (最终完整版：含销售员存档)
+# app.py - 网吧模拟器后端 (含销售员存档 + 全服聊天室)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -11,9 +11,12 @@ app = Flask(__name__)
 DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "123456zzz"
 
-LATEST_VERSION = "1.0.0"  
-UPDATE_MESSAGE = "新增自动进货的销售食品员！修复了售卖增加时间过短的Bug！"
+LATEST_VERSION = "1.0.4"  
+UPDATE_MESSAGE = "新增全服多人聊天室！修复了SSL连接超时问题！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
+
+# 【新增】全服聊天室内存存储 (最多保留50条)
+chat_history = []
 
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -27,7 +30,6 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL, token TEXT UNIQUE, token_expires TEXT, created_at TEXT)''')
-    # 【新增】增加了 has_vendor 字段
     cursor.execute('''CREATE TABLE IF NOT EXISTS saves (
         user_id INTEGER PRIMARY KEY, money INTEGER DEFAULT 500, hygiene INTEGER DEFAULT 100,
         has_cleaner INTEGER DEFAULT 0, has_repairman INTEGER DEFAULT 0, has_vendor INTEGER DEFAULT 0,
@@ -53,6 +55,27 @@ def verify_token(token):
 
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
+# ================= 新增：聊天室接口 =================
+@app.route('/api/chat/send', methods=['POST'])
+def send_chat():
+    try:
+        data = request.json
+        username = data.get('username', 'Anonymous')
+        message = data.get('message', '').strip()
+        if message and len(message) <= 50:
+            chat_history.append({'user': username, 'msg': message})
+            if len(chat_history) > 50:  # 保持内存轻量
+                chat_history.pop(0)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/api/chat/history', methods=['GET'])
+def get_chat():
+    return jsonify({'status': 'success', 'messages': chat_history[-10:]}) # 返回最新10条
+# ==================================================
+
+# (以下为原有的管理员和存档接口，保持不变)
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
