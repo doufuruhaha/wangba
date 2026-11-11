@@ -11,7 +11,7 @@ app = Flask(__name__)
 DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "123456zzz"
 
-LATEST_VERSION = "1.0.4"  
+LATEST_VERSION = "1.0.0"  
 UPDATE_MESSAGE = "新增全服多人聊天室！修复了SSL连接超时问题！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
