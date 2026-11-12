@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (含销售员存档 + 全服聊天室)
+# app.py - 网吧模拟器后端 (含销售员存档 + 聊天室 + 兑换码系统)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -12,10 +12,9 @@ DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "123456zzz"
 
 LATEST_VERSION = "1.0.0"  
-UPDATE_MESSAGE = "新增全服多人聊天室！修复了SSL连接超时问题！"
+UPDATE_MESSAGE = "新增全服兑换码系统！\n快去找老板要兑换码吧！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
-# 【新增】全服聊天室内存存储 (最多保留50条)
 chat_history = []
 
 def get_db():
@@ -37,6 +36,9 @@ def init_db():
         achievements TEXT DEFAULT '[]', reputation INTEGER DEFAULT 0, cafe_level INTEGER DEFAULT 0,
         stock_water INTEGER DEFAULT 0, stock_noodles INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
+    # 【新增】兑换码表
+    cursor.execute('''CREATE TABLE IF NOT EXISTS redeem_codes (
+        code TEXT PRIMARY KEY, reward_type TEXT NOT NULL, reward_amount INTEGER NOT NULL, description TEXT)''')
     conn.commit()
     conn.close()
 
@@ -55,7 +57,90 @@ def verify_token(token):
 
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-# ================= 新增：聊天室接口 =================
+# ================= 新增：兑换码接口 =================
+@app.route('/api/redeem', methods=['POST'])
+def redeem_code():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    user = verify_token(token)
+    if not user: return jsonify({"status": "error", "message": "未登录或Token失效"}), 401
+    
+    data = request.json
+    code = data.get('code', '').strip().upper() # 自动转大写
+    if not code: return jsonify({"status": "error", "message": "请输入兑换码"})
+    
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM redeem_codes WHERE code = ?', (code,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        return jsonify({"status": "error", "message": "兑换码无效或已被使用"})
+    
+    reward_type = row['reward_type']
+    reward_amount = row['reward_amount']
+    
+    # 发放奖励
+    if reward_type == 'money':
+        cursor.execute('UPDATE saves SET money = money + ? WHERE user_id = ?', (reward_amount, user['id']))
+    elif reward_type == 'reputation':
+        cursor.execute('UPDATE saves SET reputation = reputation + ? WHERE user_id = ?', (reward_amount, user['id']))
+        
+    # 一码一用，核销后删除
+    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "status": "success", 
+        "message": f"兑换成功！获得 {reward_amount} {reward_type}", 
+        "reward_type": reward_type, 
+        "reward_amount": reward_amount
+    })
+
+@app.route('/api/admin/add_redeem_code', methods=['POST'])
+def admin_add_redeem_code():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    data = request.json
+    code = data.get('code', '').strip().upper()
+    reward_type = data.get('reward_type', 'money')
+    reward_amount = int(data.get('reward_amount', 0))
+    
+    if not code or reward_amount <= 0:
+        return jsonify({"status": "error", "message": "参数错误"})
+        
+    conn = get_db(); cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO redeem_codes (code, reward_type, reward_amount) VALUES (?, ?, ?)', 
+                       (code, reward_type, reward_amount))
+        conn.commit()
+        return jsonify({"status": "success", "message": f"兑换码 {code} 添加成功！"})
+    except sqlite3.IntegrityError:
+        return jsonify({"status": "error", "message": "该兑换码已存在"})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/get_redeem_codes', methods=['GET'])
+def admin_get_redeem_codes():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM redeem_codes ORDER BY rowid DESC')
+    codes = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({"status": "success", "codes": codes})
+
+@app.route('/api/admin/delete_redeem_code', methods=['POST'])
+def admin_delete_redeem_code():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    data = request.json
+    code = data.get('code', '')
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "message": "已删除"})
+# ==================================================
+
+# ================= 聊天室接口 =================
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
     try:
@@ -64,18 +149,15 @@ def send_chat():
         message = data.get('message', '').strip()
         if message and len(message) <= 50:
             chat_history.append({'user': username, 'msg': message})
-            if len(chat_history) > 50:  # 保持内存轻量
-                chat_history.pop(0)
+            if len(chat_history) > 50: chat_history.pop(0)
         return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
+    except Exception as e: return jsonify({'status': 'error', 'message': str(e)})
 
 @app.route('/api/chat/history', methods=['GET'])
 def get_chat():
-    return jsonify({'status': 'success', 'messages': chat_history[-10:]}) # 返回最新10条
+    return jsonify({'status': 'success', 'messages': chat_history[-10:]})
 # ==================================================
 
-# (以下为原有的管理员和存档接口，保持不变)
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -87,12 +169,14 @@ ADMIN_HTML_TEMPLATE = """
         .container { max-width: 1000px; margin: 0 auto; }
         h1 { text-align: center; color: #3498db; }
         .login-box { background: #34495e; padding: 20px; border-radius: 8px; margin-bottom: 20px; text-align: center; }
-        input { padding: 8px; border-radius: 4px; border: none; margin: 5px; }
+        input, select { padding: 8px; border-radius: 4px; border: none; margin: 5px; background: #2c3e50; color: white; }
         button { padding: 8px 15px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
         .btn-primary { background: #3498db; color: white; } .btn-danger { background: #e74c3c; color: white; } .btn-success { background: #2ecc71; color: white; }
-        table { width: 100%; border-collapse: collapse; background: #34495e; border-radius: 8px; overflow: hidden; }
+        table { width: 100%; border-collapse: collapse; background: #34495e; border-radius: 8px; overflow: hidden; margin-top: 10px;}
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #2c3e50; } th { background: #2980b9; }
         .hidden { display: none; }
+        .tab { margin-bottom: 20px; }
+        .tab button { margin-right: 10px; }
     </style>
 </head>
 <body>
@@ -106,32 +190,71 @@ ADMIN_HTML_TEMPLATE = """
         </div>
         <div id="admin-panel" class="hidden">
             <div style="text-align: right; margin-bottom: 10px;"><button class="btn-danger" onclick="logout()">退出登录</button></div>
-            <div class="login-box" style="text-align: left;">
-                <h3>➕ 添加新用户</h3>
-                <input type="text" id="new-username" placeholder="用户名">
-                <input type="password" id="new-password" placeholder="密码">
-                <input type="number" id="new-money" placeholder="初始金钱" value="500">
-                <button class="btn-success" onclick="addUser()">添加用户</button>
+            
+            <div class="tab">
+                <button class="btn-primary" onclick="showTab('users')">用户管理</button>
+                <button class="btn-success" onclick="showTab('redeem')">兑换码管理</button>
             </div>
-            <h3>👥 用户列表</h3>
-            <table>
-                <thead><tr><th>ID</th><th>用户名</th><th>金钱</th><th>卫生度</th><th>阿姨</th><th>修理工</th><th>销售员</th><th>注册时间</th><th>操作</th></tr></thead>
-                <tbody id="user-list"></tbody>
-            </table>
+
+            <!-- 用户管理面板 -->
+            <div id="tab-users">
+                <div class="login-box" style="text-align: left;">
+                    <h3>➕ 添加新用户</h3>
+                    <input type="text" id="new-username" placeholder="用户名">
+                    <input type="password" id="new-password" placeholder="密码">
+                    <input type="number" id="new-money" placeholder="初始金钱" value="500">
+                    <button class="btn-success" onclick="addUser()">添加用户</button>
+                </div>
+                <h3>👥 用户列表</h3>
+                <table>
+                    <thead><tr><th>ID</th><th>用户名</th><th>金钱</th><th>卫生度</th><th>阿姨</th><th>修理工</th><th>销售员</th><th>注册时间</th><th>操作</th></tr></thead>
+                    <tbody id="user-list"></tbody>
+                </table>
+            </div>
+
+            <!-- 兑换码管理面板 -->
+            <div id="tab-redeem" class="hidden">
+                <div class="login-box" style="text-align: left;">
+                    <h3>🎁 生成新兑换码</h3>
+                    <input type="text" id="redeem-code" placeholder="兑换码 (如 VIP888)">
+                    <select id="redeem-type">
+                        <option value="money">金钱 (Money)</option>
+                        <option value="reputation">声望 (Reputation)</option>
+                    </select>
+                    <input type="number" id="redeem-amount" placeholder="数量" value="1000">
+                    <button class="btn-success" onclick="addRedeemCode()">生成兑换码</button>
+                </div>
+                <h3>🎟️ 当前有效兑换码</h3>
+                <table>
+                    <thead><tr><th>兑换码</th><th>奖励类型</th><th>奖励数量</th><th>操作</th></tr></thead>
+                    <tbody id="redeem-list"></tbody>
+                </table>
+            </div>
         </div>
     </div>
     <script>
         const API_URL = window.location.origin;
         let adminToken = localStorage.getItem('admin_token') || '';
-        if (adminToken) { document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); loadUsers(); }
+        if (adminToken) { document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); showTab('users'); }
+        
+        function showTab(tab) {
+            document.getElementById('tab-users').classList.add('hidden');
+            document.getElementById('tab-redeem').classList.add('hidden');
+            document.getElementById('tab-' + tab).classList.remove('hidden');
+            if (tab === 'users') loadUsers();
+            if (tab === 'redeem') loadRedeemCodes();
+        }
+
         async function adminLogin() {
             const pwd = document.getElementById('admin-pwd').value;
             if (pwd === 'ADMIN_PASSWORD_PLACEHOLDER') { 
                 adminToken = pwd; localStorage.setItem('admin_token', adminToken);
-                document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); loadUsers();
+                document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); showTab('users');
             } else { document.getElementById('login-msg').innerText = "密码错误！"; }
         }
         function logout() { localStorage.removeItem('admin_token'); location.reload(); }
+
+        // --- 用户管理 ---
         async function loadUsers() {
             const res = await fetch(`${API_URL}/api/admin/users`, { headers: { 'Authorization': `Bearer ${adminToken}` } });
             const data = await res.json(); const tbody = document.getElementById('user-list'); tbody.innerHTML = '';
@@ -164,6 +287,34 @@ ADMIN_HTML_TEMPLATE = """
             const res = await fetch(`${API_URL}/api/admin/add_user`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminToken}` }, body: JSON.stringify({ username, password, money }) });
             const data = await res.json(); alert(data.message);
             if (data.status === 'success') { document.getElementById('new-username').value = ''; document.getElementById('new-password').value = ''; loadUsers(); }
+        }
+
+        // --- 兑换码管理 ---
+        async function loadRedeemCodes() {
+            const res = await fetch(`${API_URL}/api/admin/get_redeem_codes`, { headers: { 'Authorization': `Bearer ${adminToken}` } });
+            const data = await res.json(); const tbody = document.getElementById('redeem-list'); tbody.innerHTML = '';
+            if (data.status === 'success') {
+                data.codes.forEach(c => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td><b style="color: #f1c40f;">${c.code}</b></td><td>${c.reward_type === 'money' ? '💰 金钱' : '⭐ 声望'}</td><td>${c.reward_amount}</td><td><button class="btn-danger" style="font-size:12px; padding:2px 5px;" onclick="deleteRedeem('${c.code}')">作废</button></td>`;
+                    tbody.appendChild(tr);
+                });
+            }
+        }
+        async function addRedeemCode() {
+            const code = document.getElementById('redeem-code').value.trim();
+            const type = document.getElementById('redeem-type').value;
+            const amount = parseInt(document.getElementById('redeem-amount').value);
+            if (!code || !amount) { alert('请填写完整'); return; }
+            const res = await fetch(`${API_URL}/api/admin/add_redeem_code`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminToken}` }, body: JSON.stringify({ code, reward_type: type, reward_amount: amount }) });
+            const data = await res.json(); alert(data.message);
+            if (data.status === 'success') { document.getElementById('redeem-code').value = ''; loadRedeemCodes(); }
+        }
+        async function deleteRedeem(code) {
+            if (confirm(`确定要作废兑换码 "${code}" 吗？`)) {
+                await fetch(`${API_URL}/api/admin/delete_redeem_code`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminToken}` }, body: JSON.stringify({ code }) });
+                loadRedeemCodes();
+            }
         }
     </script>
 </body>
