@@ -11,7 +11,7 @@ app = Flask(__name__)
 DATABASE = 'netcafe.db'
 ADMIN_PASSWORD = "123456zzz"
 
-LATEST_VERSION = "1.0.0"  
+LATEST_VERSION = "1.2.0"  
 UPDATE_MESSAGE = "新增全服兑换码系统！\n快去找老板要兑换码吧！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
