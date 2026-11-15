@@ -1,4 +1,4 @@
-# app.py - 网吧模拟器后端 (含销售员存档 + 聊天室 + 兑换码系统)
+# app.py - 网吧模拟器后端 (1.1.8 完整版：含排行榜)
 from flask import Flask, request, jsonify, render_template_string
 import sqlite3
 import hashlib
@@ -9,10 +9,10 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 DATABASE = 'netcafe.db'
-ADMIN_PASSWORD = "123456zzz"
+ADMIN_PASSWORD = "wangbaNB666"
 
-LATEST_VERSION = "1.2.0"  
-UPDATE_MESSAGE = "新增全服兑换码系统！\n快去找老板要兑换码吧！"
+LATEST_VERSION = "1.2.0"
+UPDATE_MESSAGE = "新增全服富豪排行榜！按 R 键查看！\n优化了 UI 布局，界面更清爽！"
 DOWNLOAD_URL = "https://github.com/doufuruhaha/wangba/releases"
 
 chat_history = []
@@ -36,9 +36,8 @@ def init_db():
         achievements TEXT DEFAULT '[]', reputation INTEGER DEFAULT 0, cafe_level INTEGER DEFAULT 0,
         stock_water INTEGER DEFAULT 0, stock_noodles INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)''')
-    # 【新增】兑换码表
     cursor.execute('''CREATE TABLE IF NOT EXISTS redeem_codes (
-        code TEXT PRIMARY KEY, reward_type TEXT NOT NULL, reward_amount INTEGER NOT NULL, description TEXT)''')
+        code TEXT PRIMARY KEY, reward_type TEXT NOT NULL, reward_amount INTEGER NOT NULL)''')
     conn.commit()
     conn.close()
 
@@ -57,88 +56,20 @@ def verify_token(token):
 
 def check_admin_auth(): return request.headers.get('Authorization', '') == f'Bearer {ADMIN_PASSWORD}'
 
-# ================= 新增：兑换码接口 =================
-@app.route('/api/redeem', methods=['POST'])
-def redeem_code():
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    user = verify_token(token)
-    if not user: return jsonify({"status": "error", "message": "未登录或Token失效"}), 401
-    
-    data = request.json
-    code = data.get('code', '').strip().upper() # 自动转大写
-    if not code: return jsonify({"status": "error", "message": "请输入兑换码"})
-    
+# ================= 排行榜接口 =================
+@app.route('/api/leaderboard', methods=['GET'])
+def get_leaderboard():
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('SELECT * FROM redeem_codes WHERE code = ?', (code,))
-    row = cursor.fetchone()
-    
-    if not row:
-        conn.close()
-        return jsonify({"status": "error", "message": "兑换码无效或已被使用"})
-    
-    reward_type = row['reward_type']
-    reward_amount = row['reward_amount']
-    
-    # 发放奖励
-    if reward_type == 'money':
-        cursor.execute('UPDATE saves SET money = money + ? WHERE user_id = ?', (reward_amount, user['id']))
-    elif reward_type == 'reputation':
-        cursor.execute('UPDATE saves SET reputation = reputation + ? WHERE user_id = ?', (reward_amount, user['id']))
-        
-    # 一码一用，核销后删除
-    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        "status": "success", 
-        "message": f"兑换成功！获得 {reward_amount} {reward_type}", 
-        "reward_type": reward_type, 
-        "reward_amount": reward_amount
-    })
-
-@app.route('/api/admin/add_redeem_code', methods=['POST'])
-def admin_add_redeem_code():
-    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    data = request.json
-    code = data.get('code', '').strip().upper()
-    reward_type = data.get('reward_type', 'money')
-    reward_amount = int(data.get('reward_amount', 0))
-    
-    if not code or reward_amount <= 0:
-        return jsonify({"status": "error", "message": "参数错误"})
-        
-    conn = get_db(); cursor = conn.cursor()
-    try:
-        cursor.execute('INSERT INTO redeem_codes (code, reward_type, reward_amount) VALUES (?, ?, ?)', 
-                       (code, reward_type, reward_amount))
-        conn.commit()
-        return jsonify({"status": "success", "message": f"兑换码 {code} 添加成功！"})
-    except sqlite3.IntegrityError:
-        return jsonify({"status": "error", "message": "该兑换码已存在"})
-    finally:
-        conn.close()
-
-@app.route('/api/admin/get_redeem_codes', methods=['GET'])
-def admin_get_redeem_codes():
-    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    conn = get_db(); cursor = conn.cursor()
-    cursor.execute('SELECT * FROM redeem_codes ORDER BY rowid DESC')
-    codes = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({"status": "success", "codes": codes})
-
-@app.route('/api/admin/delete_redeem_code', methods=['POST'])
-def admin_delete_redeem_code():
-    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
-    data = request.json
-    code = data.get('code', '')
-    conn = get_db(); cursor = conn.cursor()
-    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success", "message": "已删除"})
-# ==================================================
+    cursor.execute('''
+        SELECT u.username, s.total_earned, s.money, s.cafe_level
+        FROM saves s JOIN users u ON s.user_id = u.id
+        ORDER BY s.total_earned DESC LIMIT 10
+    ''')
+    rows = cursor.fetchall(); conn.close()
+    leaderboard = [{"rank": i+1, "username": r['username'], "total_earned": r['total_earned'],
+                    "money": r['money'], "cafe_level": r['cafe_level']} for i, r in enumerate(rows)]
+    return jsonify({"status": "success", "leaderboard": leaderboard})
+# ============================================================
 
 # ================= 聊天室接口 =================
 @app.route('/api/chat/send', methods=['POST'])
@@ -156,7 +87,70 @@ def send_chat():
 @app.route('/api/chat/history', methods=['GET'])
 def get_chat():
     return jsonify({'status': 'success', 'messages': chat_history[-10:]})
-# ==================================================
+# ============================================================
+
+# ================= 兑换码接口 =================
+@app.route('/api/redeem', methods=['POST'])
+def redeem_code():
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    user = verify_token(token)
+    if not user: return jsonify({"status": "error", "message": "未登录"}), 401
+    data = request.json
+    code = data.get('code', '').strip().upper()
+    if not code: return jsonify({"status": "error", "message": "请输入兑换码"})
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM redeem_codes WHERE code = ?', (code,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"status": "error", "message": "兑换码无效或已被使用"})
+    reward_type = row['reward_type']; reward_amount = row['reward_amount']
+    if reward_type == 'money':
+        cursor.execute('UPDATE saves SET money = money + ? WHERE user_id = ?', (reward_amount, user['id']))
+    elif reward_type == 'reputation':
+        cursor.execute('UPDATE saves SET reputation = reputation + ? WHERE user_id = ?', (reward_amount, user['id']))
+    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
+    conn.commit(); conn.close()
+    return jsonify({"status": "success", "message": f"兑换成功！获得 {reward_amount} {reward_type}",
+                    "reward_type": reward_type, "reward_amount": reward_amount})
+
+@app.route('/api/admin/add_redeem_code', methods=['POST'])
+def admin_add_redeem_code():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    data = request.json
+    code = data.get('code', '').strip().upper()
+    reward_type = data.get('reward_type', 'money')
+    reward_amount = int(data.get('reward_amount', 0))
+    if not code or reward_amount <= 0: return jsonify({"status": "error", "message": "参数错误"})
+    conn = get_db(); cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO redeem_codes (code, reward_type, reward_amount) VALUES (?, ?, ?)',
+                       (code, reward_type, reward_amount))
+        conn.commit()
+        return jsonify({"status": "success", "message": f"兑换码 {code} 添加成功！"})
+    except sqlite3.IntegrityError:
+        return jsonify({"status": "error", "message": "该兑换码已存在"})
+    finally: conn.close()
+
+@app.route('/api/admin/get_redeem_codes', methods=['GET'])
+def admin_get_redeem_codes():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('SELECT * FROM redeem_codes ORDER BY rowid DESC')
+    codes = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({"status": "success", "codes": codes})
+
+@app.route('/api/admin/delete_redeem_code', methods=['POST'])
+def admin_delete_redeem_code():
+    if not check_admin_auth(): return jsonify({"status": "error", "message": "未授权"}), 403
+    data = request.json
+    code = data.get('code', '')
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('DELETE FROM redeem_codes WHERE code = ?', (code,))
+    conn.commit(); conn.close()
+    return jsonify({"status": "success", "message": "已删除"})
+# ============================================================
 
 ADMIN_HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -190,13 +184,10 @@ ADMIN_HTML_TEMPLATE = """
         </div>
         <div id="admin-panel" class="hidden">
             <div style="text-align: right; margin-bottom: 10px;"><button class="btn-danger" onclick="logout()">退出登录</button></div>
-            
             <div class="tab">
                 <button class="btn-primary" onclick="showTab('users')">用户管理</button>
                 <button class="btn-success" onclick="showTab('redeem')">兑换码管理</button>
             </div>
-
-            <!-- 用户管理面板 -->
             <div id="tab-users">
                 <div class="login-box" style="text-align: left;">
                     <h3>➕ 添加新用户</h3>
@@ -211,8 +202,6 @@ ADMIN_HTML_TEMPLATE = """
                     <tbody id="user-list"></tbody>
                 </table>
             </div>
-
-            <!-- 兑换码管理面板 -->
             <div id="tab-redeem" class="hidden">
                 <div class="login-box" style="text-align: left;">
                     <h3>🎁 生成新兑换码</h3>
@@ -236,7 +225,6 @@ ADMIN_HTML_TEMPLATE = """
         const API_URL = window.location.origin;
         let adminToken = localStorage.getItem('admin_token') || '';
         if (adminToken) { document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); showTab('users'); }
-        
         function showTab(tab) {
             document.getElementById('tab-users').classList.add('hidden');
             document.getElementById('tab-redeem').classList.add('hidden');
@@ -244,17 +232,16 @@ ADMIN_HTML_TEMPLATE = """
             if (tab === 'users') loadUsers();
             if (tab === 'redeem') loadRedeemCodes();
         }
-
         async function adminLogin() {
             const pwd = document.getElementById('admin-pwd').value;
-            if (pwd === 'ADMIN_PASSWORD_PLACEHOLDER') { 
+            if (pwd === 'ADMIN_PASSWORD_PLACEHOLDER') {
                 adminToken = pwd; localStorage.setItem('admin_token', adminToken);
-                document.getElementById('login-section').classList.add('hidden'); document.getElementById('admin-panel').classList.remove('hidden'); showTab('users');
+                document.getElementById('login-section').classList.add('hidden');
+                document.getElementById('admin-panel').classList.remove('hidden');
+                showTab('users');
             } else { document.getElementById('login-msg').innerText = "密码错误！"; }
         }
         function logout() { localStorage.removeItem('admin_token'); location.reload(); }
-
-        // --- 用户管理 ---
         async function loadUsers() {
             const res = await fetch(`${API_URL}/api/admin/users`, { headers: { 'Authorization': `Bearer ${adminToken}` } });
             const data = await res.json(); const tbody = document.getElementById('user-list'); tbody.innerHTML = '';
@@ -288,8 +275,6 @@ ADMIN_HTML_TEMPLATE = """
             const data = await res.json(); alert(data.message);
             if (data.status === 'success') { document.getElementById('new-username').value = ''; document.getElementById('new-password').value = ''; loadUsers(); }
         }
-
-        // --- 兑换码管理 ---
         async function loadRedeemCodes() {
             const res = await fetch(`${API_URL}/api/admin/get_redeem_codes`, { headers: { 'Authorization': `Bearer ${adminToken}` } });
             const data = await res.json(); const tbody = document.getElementById('redeem-list'); tbody.innerHTML = '';
@@ -339,7 +324,7 @@ def register():
     try:
         password_hash = hash_password(password); token = generate_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
-        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)', 
+        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)',
                        (username, password_hash, token, expires, created_at))
         user_id = cursor.lastrowid
         cursor.execute('INSERT INTO saves (user_id) VALUES (?)', (user_id,))
@@ -387,12 +372,12 @@ def save_data():
     conn = get_db(); cursor = conn.cursor()
     cursor.execute('''INSERT INTO saves (user_id, money, hygiene, has_cleaner, has_repairman, has_vendor, socket_states, total_earned, achievements, reputation, cafe_level, stock_water, stock_noodles)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene, 
+        ON CONFLICT(user_id) DO UPDATE SET money=excluded.money, hygiene=excluded.hygiene,
         has_cleaner=excluded.has_cleaner, has_repairman=excluded.has_repairman, has_vendor=excluded.has_vendor,
         socket_states=excluded.socket_states, total_earned=excluded.total_earned, achievements=excluded.achievements,
         reputation=excluded.reputation, cafe_level=excluded.cafe_level,
         stock_water=excluded.stock_water, stock_noodles=excluded.stock_noodles''',
-        (user['id'], data.get('money', 500), data.get('hygiene', 100), 
+        (user['id'], data.get('money', 500), data.get('hygiene', 100),
          1 if data.get('has_cleaner') else 0, 1 if data.get('has_repairman') else 0, 1 if data.get('has_vendor') else 0,
          json.dumps(data.get('socket_states', [0,0,0])), data.get('total_earned', 0), json.dumps(data.get('achievements', [])),
          data.get('reputation', 0), data.get('cafe_level', 0),
@@ -431,7 +416,7 @@ def admin_add_user():
     try:
         password_hash = hash_password(password); token = generate_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat(); created_at = datetime.now().isoformat()
-        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)', 
+        cursor.execute('INSERT INTO users (username, password_hash, token, token_expires, created_at) VALUES (?, ?, ?, ?, ?)',
                        (username, password_hash, token, expires, created_at))
         user_id = cursor.lastrowid
         cursor.execute('INSERT INTO saves (user_id, money) VALUES (?, ?)', (user_id, money))
@@ -440,6 +425,6 @@ def admin_add_user():
     except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "用户名已存在"}), 409
     finally: conn.close()
 
-if __name__ == '__main__': 
+if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
